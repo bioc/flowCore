@@ -351,7 +351,8 @@ setMethod("compensate",
                    paste(cols[!sel], collapse=", "), call.=FALSE)
           e <- exprs(x)
           e[, cols] <- t(solve(spillover)%*%t(e[,cols]))
-          exprs(x) = e
+          e[, cols] <- t(solve(t(spillover))%*%t(e[,cols]))
+          exprs(x) <- e
           x
       })
 
