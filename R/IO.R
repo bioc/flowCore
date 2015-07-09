@@ -57,6 +57,7 @@ read.FCS <- function(filename,
                      decades=0,
                      ncdf=FALSE,
                      min.limit=NULL,
+                     truncate_max_range = TRUE, 
                      dataset=NULL,                     
                      emptyValue=TRUE
                     , ...)
@@ -120,7 +121,7 @@ read.FCS <- function(filename,
        txt[["transformation"]] %in% c("applied", "custom"))
        transformation <- FALSE
     mat <- readFCSdata(con, offsets, txt, transformation, which.lines,
-                       scale, alter.names, decades, min.limit)
+                       scale, alter.names, decades, min.limit, truncate_max_range)
     matRanges <- attr(mat,"ranges")
 
 	
@@ -233,7 +234,7 @@ makeFCSparameters <- function(cn, txt, transformation, scale, decades,
     desc <- gsub("^\\s+|\\s+$", "", desc)#trim the leading and tailing whitespaces
     # replace the empty desc with NA
     desc <- sapply(desc, function(thisDesc){
-            if(nchar(thisDesc) == 0)
+            if(!nzchar(thisDesc))
               NA
             else
               thisDesc
@@ -349,8 +350,10 @@ readFCStext <- function(con, offsets,emptyValue, cpp = TRUE)
           rv = fcsTextParse(txt,emptyValue=emptyValue)
         else
 		  rv = fcs_text_parse(txt,emptyValue=emptyValue)
-		rv = c(offsets["FCSversion"], rv)
-		names(rv)[1] = "FCSversion" #not sure if this line is necessary	
+        
+        if(!"FCSversion"%in%names(rv))
+		  rv <- c(offsets["FCSversion"], rv)
+			
 		names(rv) <- gsub("^ *| *$", "", names(rv))#trim the leading and trailing whitespaces
 	}
 	
@@ -501,7 +504,7 @@ fcs_text_parse = function(str,emptyValue) {
 ## read FCS file data section
 ## - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 readFCSdata <- function(con, offsets, x, transformation, which.lines,
-                        scale, alter.names, decades, min.limit=-111) {
+                        scale, alter.names, decades, min.limit=-111, truncate_max_range = TRUE) {
     endian <- switch(readFCSgetPar(x, "$BYTEORD"),
                      "4,3,2,1" = "big",
                      "2,1" = "big",
@@ -528,8 +531,15 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
                 x[[sprintf("flowCore_$P%sRmax", k)]]
              })
     } else {
-       range <- as.integer(readFCSgetPar(x, paste("$P", 1:nrpar, "R", sep="")))
+        range_str <- readFCSgetPar(x, paste("$P", 1:nrpar, "R", sep=""))
+        if(dattype=="integer")
+          range <- as.integer(range_str)
+        else
+          range <- as.numeric(range_str)
+       if(any(is.na(range)))
+         stop("$PnR is larger than the integer limit: ", range_str[is.na(range)][1])
     }
+    
     bitwidth <- as.integer(readFCSgetPar(x, paste("$P", 1:nrpar, "B", sep="")))
     bitwidth <- unique(bitwidth)
     
@@ -591,8 +601,10 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
         bitwidth <- 16
     }
     size <- bitwidth/8
-#    if (!size %in% c(1, 2, 4, 8))
-#        stop(paste("Don't know how to deal with bitwidth", bitwidth))
+
+    # since signed = FALSE is not supported by readBin when size > 2
+    # we set it to TRUE automatically then to avoid warning flooded by readBin
+    # It shouldn't cause data clipping since we haven't found any use case where datatype is unsigned integer with size > 16bits 
     signed <- !(size%in%c(1,2))
     
     nwhichLines <- length(which.lines)
@@ -671,12 +683,15 @@ readFCSdata <- function(con, offsets, x, transformation, which.lines,
     cn  <- readFCSgetPar(x, paste("$P", 1:nrpar, "N", sep=""))
     colnames(dat) <- if(alter.names)  structure(make.names(cn),
                                                 names=names(cn))else cn
-
+    
     ## truncate data at max range
     if(is.na(x["transformation"]))
     {
-        for(i in seq_len(ncol(dat)))
-            dat[dat[,i]>range[i],i] <- range[i]
+        if(truncate_max_range){
+          for(i in seq_len(ncol(dat)))
+            dat[dat[,i]>range[i],i] <- range[i]  
+        }
+        
         if(!is.null(min.limit))
             dat[dat<min.limit] <- min.limit
     }
@@ -946,10 +961,8 @@ writeFCSheader <- function(con, offsets)
         if( nchar(val1) > 8 || nchar(val2) > 8){
              val1 <- val2 <- 0
         }
-        writeChar(paste(paste(rep(" ", 8 - nchar(val1)), collapse=""), val1,
-                        collapse="", sep=""), con, eos=NULL)
-        writeChar(paste(paste(rep(" ", 8 - nchar(val2)), collapse=""), val2,
-                        collapse="", sep=""), con, eos=NULL)
+        writeChar(sprintf("%8s", val1), con, eos=NULL)
+        writeChar(sprintf("%8s", val2), con, eos=NULL)
     }
      invisible()
 }
@@ -959,7 +972,7 @@ writeFCSheader <- function(con, offsets)
 ## ==========================================================================
 ## collapse the content of the description slot into a character vector
 ## - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-collapseDesc <- function(x)
+collapseDesc <- function(x, delimiter = "\\")
 {
     d <- description(x)
 	##make sure there is no empty value for each keyword in order to conform to FCS3.0
@@ -973,8 +986,24 @@ collapseDesc <- function(x)
 					#make sure spillover matrix doesn't get converted to vector
 					if(is.matrix(y))
 						return (y)   
-					else
-						return(sub("^$"," ",y))
+					else{
+					  
+					  y <- sub("^$"," ",y)
+					  double_delimiter <- paste0(delimiter, delimiter)
+                      
+#                      browser()
+                      #replace the existing double delimiter with a temp string
+                      # to skip escapping operation
+                      tempString <- guid()
+                      # useBytes = TRUE to avoid  errors/warnings about invalid inputs (e.g. "CELLQuest\xaa")
+                      y <- gsub(double_delimiter, tempString, y, fixed = TRUE, useBytes = TRUE)
+                      #escape single delimiter character by doubling it
+					  y <- gsub(delimiter, double_delimiter, y, fixed = TRUE, useBytes = TRUE)
+                      #restore the original double delimiter
+                      
+                      return(gsub(tempString, double_delimiter, y, fixed = TRUE, useBytes = TRUE))
+					}
+						
 				}
 					 
 						
@@ -989,8 +1018,8 @@ collapseDesc <- function(x)
 		vec <- paste(c(t(mat)),sep=",",collapse=",")
 	    d[spillName] <- paste(c(rNum,clNames,vec),sep=",",collapse=",")
 	}
-    paste("\\", iconv(paste(names(d), "\\", sapply(d, paste, collapse=" "),
-                            "\\", collapse="", sep=""), to="latin1",
+    paste(delimiter, iconv(paste(names(d), delimiter, sapply(d, paste, collapse=" "),
+                                 delimiter, collapse="", sep=""), to="latin1",
                       sub=" "), sep="")
    
 }
@@ -1002,7 +1031,7 @@ collapseDesc <- function(x)
 ## is taken from the idnetifier of the flowFrame. 'what' controls the output
 ## data type.
 ## - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-write.FCS <- function(x, filename, what="numeric")
+write.FCS <- function(x, filename, what="numeric", delimiter = "\\")
 {
   warning("'write.FCS' is not fully tested and should be considered as experimental.")
     ## Some sanity checking up front
@@ -1064,7 +1093,7 @@ write.FCS <- function(x, filename, what="numeric")
     description(x) <- mk
     ## Figure out the offsets based on the size of the initial text section
     ld <-  length(exprs(x)) * types[what, "bitwidth"]
-    ctxt <- collapseDesc(x)
+    ctxt <- collapseDesc(x, delimiter = delimiter)
     endTxt <- nchar(ctxt) + begTxt -1
     endDat <- ld + endTxt
     endTxt <- endTxt +(nchar(endTxt+1)-1) + (nchar(endDat)-1)
@@ -1073,7 +1102,7 @@ write.FCS <- function(x, filename, what="numeric")
     endDat <- ld + endTxt
     description(x) <- list("$BEGINDATA"=endTxt+1,
                            "$ENDDATA"=endTxt+ld)
-    ctxt <- collapseDesc(x)
+    ctxt <- collapseDesc(x, delimiter = delimiter)
 	
     offsets <- c(begTxt, endTxt, endTxt+1, endTxt+ld, 0,0)
     ## Write out to file
