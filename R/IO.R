@@ -1409,17 +1409,33 @@ write.FCS <- function(x, filename, what="numeric", delimiter = "|", endian = "bi
     ## Figure out the offsets based on the size of the initial text section
     ld <-  length(exprs(x)) * types[what, "bitwidth"]
     ctxt <- collapseDesc(x, delimiter = delimiter)
-    endTxt <- nchar(ctxt) + begTxt -1
-    endDat <- ld + endTxt
-    endTxt <- endTxt +(nchar(endTxt+1)-1) + (nchar(endDat)-1)
-    ## Now we update the header with the new offsets and recalculate
-#	browser()
-    endDat <- ld + endTxt
-    description(x) <- list("$BEGINDATA"=endTxt+1,
-                           "$ENDDATA"=endTxt+ld)
+
+    #try to update the Txt with actual BEGINDATA and  ENDDATA values
+    kw.len.old <- 2 #two initial '0' s
+    endTxt <- nchar(ctxt, "bytes") + begTxt - 1#must use type = "bytes" as txt could contain special character(e.g. German umlauts) that results in multi-byte write by writeChar
+    repeat#keep updating txt until its length stop increasing 
+    {
+      #compute the offsets based on endTxt
+      datastart <- endTxt + 1  
+      dataend <-  datastart + ld - 1 
+      
+      #check if new values cause txt len to increase
+      kw.len.new <- nchar(datastart) + nchar(dataend)
+      if(kw.len.new > kw.len.old)
+      {
+        #update the endTxt
+        endTxt <- endTxt + kw.len.new - kw.len.old
+        kw.len.old <- kw.len.new
+        
+      }else
+        break
+    }
+  
+    description(x) <- list("$BEGINDATA" = datastart,
+                           "$ENDDATA" = dataend)
     ctxt <- collapseDesc(x, delimiter = delimiter)
 
-    offsets <- c(begTxt, endTxt, endTxt+1, endTxt+ld, 0,0)
+    offsets <- c(begTxt, endTxt, datastart, dataend, 0,0)
     ## Write out to file
     con <- file(filename, open="wb")
     on.exit(close(con))
