@@ -26,7 +26,7 @@ Imports:
     stats4,
     Rcpp,
     matrixStats,
-    cytolib (>= 2.13.1),
+    cytolib (>= 2.12.1),
     S4Vectors
 Suggests:
     Rgraphviz,
